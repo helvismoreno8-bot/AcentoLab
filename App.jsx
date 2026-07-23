@@ -54,11 +54,12 @@ const CSS = `
 .al-mini{padding:9px 13px;font-size:13.5px;border-radius:10px;}
 .al-btn[disabled]{opacity:.5;cursor:not-allowed;}
 
-.al-tabs{display:flex;gap:6px;background:#E4E8EB;border:1px solid var(--line);
-  padding:5px;border-radius:14px;margin:18px 0;overflow:auto;}
+.al-tabs{display:flex;flex-wrap:wrap;justify-content:center;gap:7px;background:#E4E8EB;border:1px solid var(--line);
+  padding:7px;border-radius:16px;margin:18px 0;}
 .al-tab{flex:0 0 auto;white-space:nowrap;border:none;background:transparent;cursor:pointer;
   font-family:var(--sans);font-weight:600;font-size:13.5px;color:var(--muted);
-  padding:9px 12px;border-radius:10px;transition:all .15s;}
+  padding:9px 14px;border-radius:11px;transition:all .15s;}
+.al-tab:hover{color:var(--ink);}
 .al-tab.on{background:#fff;color:var(--ink);box-shadow:0 4px 12px -6px rgba(27,34,51,.4);}
 
 .al-chip{display:inline-flex;align-items:center;gap:7px;background:#EAF6F3;color:#0B7568;
@@ -328,7 +329,8 @@ function useSpeech() {
   const speak = useCallback((text, key, rate = 0.88) => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
     window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
+    const clean = String(text).replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u200D\uFE0F\u2600-\u27BF]/gu, "").replace(/\s+/g, " ").trim();
+    const u = new SpeechSynthesisUtterance(clean);
     if (enVoice) u.voice = enVoice;
     u.lang = "en-US"; u.rate = rate;
     u.onend = () => setSpeakingKey(null);
@@ -780,28 +782,51 @@ function IdiomsModule({ level, speech, rec }) {
 
 function ChatModule({ level, speech, onTurn }) {
   const [messages, setMessages] = useState([
-    { role: "assistant", content: "Hi! 👋 I'm your English practice partner. Tell me — what did you do today?" },
+    { role: "assistant", content: "Hi! I'm your English practice partner. Tell me — what did you do today?" },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [listening, setListening] = useState(false);
   const boxRef = useRef(null);
+  const recRef = useRef(null);
+  const SR = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
   useEffect(() => { if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight; }, [messages, loading]);
 
-  async function send() {
-    const text = input.trim();
+  async function send(rawText, viaVoice) {
+    const text = (rawText != null ? rawText : input).trim();
     if (!text || loading) return;
     const next = [...messages, { role: "user", content: text }];
     setMessages(next); setInput(""); setLoading(true); onTurn();
     try {
-      const sys = `You are a warm, encouraging English conversation partner for a Spanish speaker from Bogotá, Colombia, at CEFR level ${level}. You already greeted them. Keep replies SHORT (2-3 sentences), natural spoken English suited to level ${level}, and ALWAYS end with a simple question to keep the chat going. If they make an important mistake, add one short line at the very end starting with "💡" giving the fix in Spanish (e.g. "💡 Mejor: ..."). Don't nitpick tiny things.`;
+      const sys = `You are a warm, encouraging English conversation partner for a Spanish speaker from Bogotá, Colombia, at CEFR level ${level}. You already greeted them. Keep replies SHORT (2-3 sentences), natural spoken English suited to level ${level}, and ALWAYS end with a simple question to keep the chat going. Do not use emojis anywhere except the single marker described below. If they make an important mistake, add one short line at the very end starting with "💡" giving the fix in Spanish (e.g. "💡 Mejor: ..."). Don't nitpick tiny things.`;
       const firstUser = next.findIndex((m) => m.role === "user");
       const apiMsgs = next.slice(firstUser).map((m) => ({ role: m.role, content: m.content }));
-      const reply = await claudeText(sys, apiMsgs);
-      setMessages((m) => [...m, { role: "assistant", content: reply || "Sorry, could you say that again?" }]);
+      const reply = (await claudeText(sys, apiMsgs)) || "Sorry, could you say that again?";
+      setMessages((m) => [...m, { role: "assistant", content: reply }]);
+      if (viaVoice) speech.speak(reply.split("💡")[0], "voice" + Date.now());
     } catch (e) {
       setMessages((m) => [...m, { role: "assistant", content: "⚠️ Se cayó la conexión con el tutor. Intenta de nuevo." }]);
     }
     setLoading(false);
+  }
+
+  function startListening() {
+    if (loading || !SR) return;
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (e) => { const t = e.results[0][0].transcript; setListening(false); send(t, true); };
+    rec.onerror = () => setListening(false);
+    rec.onend = () => setListening(false);
+    recRef.current = rec;
+    setListening(true);
+    try { rec.start(); } catch (e) { setListening(false); }
+  }
+  function stopListening() {
+    try { if (recRef.current) recRef.current.stop(); } catch (e) {}
+    setListening(false);
   }
 
   function renderTut(content) {
@@ -836,14 +861,24 @@ function ChatModule({ level, speech, onTurn }) {
           ))}
           {loading && <div className="al-bub tut"><span className="al-spin" style={{ width: 14, height: 14 }} /></div>}
         </div>
-        <div className="al-row" style={{ marginTop: 14, flexWrap: "nowrap" }}>
-          <input className="al-input" placeholder="Escribe en inglés…" value={input}
+        {SR ? (
+          <button className={"al-btn " + (listening ? "al-primary" : "al-teal")} style={{ width: "100%", marginTop: 14, fontSize: 16 }}
+            onClick={listening ? stopListening : startListening} disabled={loading}>
+            {listening ? <><span className="al-rec" />Escuchando… habla ahora</> : "🎤 Hablar"}
+          </button>
+        ) : (
+          <div className="al-tip" style={{ marginTop: 14 }}>
+            Tu navegador no permite hablar por voz. Ábrela en Chrome o Edge para conversar hablando; por ahora puedes escribir.
+          </div>
+        )}
+        <div className="al-row" style={{ marginTop: 10, flexWrap: "nowrap" }}>
+          <input className="al-input" placeholder="…o escribe en inglés" value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") send(); }} />
-          <button className="al-btn al-primary" onClick={send} disabled={loading || !input.trim()}>Enviar</button>
+          <button className="al-btn al-primary" onClick={() => send()} disabled={loading || !input.trim()}>Enviar</button>
         </div>
         <div className="al-note" style={{ marginTop: 10 }}>
-          Consejo: escribe tu respuesta, luego pulsa 🔊 en la respuesta del tutor y léela en voz alta imitando el ritmo.
+          Pulsa <b>🎤 Hablar</b>, di tu respuesta en inglés y el tutor te contesta en voz alta. Pulsa 🎤 otra vez para responderle.
         </div>
       </div>
     </div>
